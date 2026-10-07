@@ -1,0 +1,80 @@
+# Frontseat's image: the all-in-one HyperDX with authentication, and this
+# fork's OIDC sign-in, for the Frontseat fleet. A tag vX.Y.Z-frontseat.N
+# builds it on both architectures natively and publishes one multi-arch
+# ghcr.io/frontseat-dev/hyperdx:X.Y.Z-frontseat.N. Upstream's own workflows
+# run on main, which this fork leaves as it is.
+name: frontseat image
+on:
+  push:
+    tags: ['v*-frontseat.*']
+permissions:
+  contents: read
+  packages: write
+env:
+  IMAGE: ghcr.io/frontseat-dev/hyperdx
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { platform: linux/amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: version
+        # v2.38.0-frontseat.1 -> 2.38.0 (the code version HyperDX reports)
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "code=${tag%%-frontseat.*}" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/hyperdx/Dockerfile
+          target: all-in-one-auth
+          platforms: ${{ matrix.platform }}
+          build-contexts: |
+            clickhouse=docker/clickhouse
+            otel-collector=docker/otel-collector
+            hyperdx=docker/hyperdx
+            api=packages/api
+            app=packages/app
+          build-args: CODE_VERSION=${{ steps.version.outputs.code }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          retention-days: 1
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - working-directory: /tmp/digests
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          docker buildx imagetools create -t "$IMAGE:$tag" $(printf "$IMAGE@sha256:%s " *)
+          docker buildx imagetools inspect "$IMAGE:$tag"
