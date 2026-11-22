@@ -11,6 +11,8 @@ like upstream; upstream's licence and notices are unchanged.
   with authentication, for linux/amd64 and linux/arm64, as
   `ghcr.io/frontseat-dev/hyperdx:X.Y.Z-frontseat.N`.
 
-A new upstream release: sync `main` from ai-1st/hyperdx (which follows
-hyperdxio/hyperdx), merge it into `frontseat`, tag. Fixes to the sign-in go
-to ai-1st/hyperdx as pull requests, not here.
+`frontseat` follows upstream's releases directly, whether or not
+ai-1st/hyperdx has synced yet: a new release is its tag
+(`@hyperdx/app@X.Y.Z` in hyperdxio/hyperdx) merged into `frontseat`, then
+`vX.Y.Z-frontseat.1` tagged. Changes to the sign-in go to ai-1st/hyperdx as
+pull requests as well, so the fork carries as little of its own as it can.
