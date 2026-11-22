@@ -1,0 +1,27 @@
+# This configuration enables bearer token authentication for the OTLP receiver
+# Only included when OTLP_AUTH_TOKEN environment variable is set
+
+extensions:
+  bearertokenauth/hyperdx:
+    scheme: ""
+    # The extension matches the full Authorization header value exactly, so
+    # list the `Bearer `-prefixed forms that RFC 6750 clients send alongside
+    # the bare token.
+    tokens:
+      - ${env:OTLP_AUTH_TOKEN}
+      - Bearer ${env:OTLP_AUTH_TOKEN}
+      - bearer ${env:OTLP_AUTH_TOKEN}
+      - BEARER ${env:OTLP_AUTH_TOKEN}
+
+receivers:
+  otlp/hyperdx:
+    protocols:
+      grpc:
+        auth:
+          authenticator: bearertokenauth/hyperdx
+      http:
+        auth:
+          authenticator: bearertokenauth/hyperdx
+
+service:
+  extensions: [health_check, bearertokenauth/hyperdx]

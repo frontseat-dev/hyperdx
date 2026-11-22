@@ -1,0 +1,305 @@
+import {
+  ALERT_INTERVAL_TO_MINUTES,
+  AlertChartConfig,
+  AlertErrorType,
+  AlertThresholdType,
+} from '@hyperdx/common-utils/dist/types';
+export { AlertThresholdType } from '@hyperdx/common-utils/dist/types';
+import mongoose, { Schema } from 'mongoose';
+
+import type { ObjectId } from '.';
+import Team from './team';
+
+export enum AlertState {
+  ALERT = 'ALERT',
+  DISABLED = 'DISABLED',
+  /**
+   * Only used on AlertHistory records (never on the alert itself): marks an
+   * evaluation window whose evaluation or notification failed. ERROR history
+   * rows are excluded from alert scheduling/backfill computations so the
+   * failed window is still retried.
+   */
+  ERROR = 'ERROR',
+  INSUFFICIENT_DATA = 'INSUFFICIENT_DATA',
+  OK = 'OK',
+  PENDING = 'PENDING',
+}
+
+export interface IAlertError {
+  timestamp: Date;
+  type: AlertErrorType;
+  message: string;
+}
+
+// follow 'ms' pkg formats
+export type AlertInterval =
+  | '1m'
+  | '5m'
+  | '15m'
+  | '30m'
+  | '1h'
+  | '6h'
+  | '12h'
+  | '1d';
+
+export type AlertChannel =
+  | {
+      type: 'webhook';
+      webhookId: string;
+    }
+  | {
+      type: null;
+    };
+
+/**
+ * Resolve an alert's notification channels regardless of document vintage:
+ * documents written before multi-channel support only have the singular
+ * `channel`. Writers keep `channel` mirrored to `channels[0]`.
+ */
+export const getAlertChannels = (alert: {
+  channel?: AlertChannel | null;
+  channels?: AlertChannel[] | null;
+}): AlertChannel[] => {
+  if (alert.channels != null && alert.channels.length > 0) {
+    return alert.channels;
+  }
+  if (alert.channel != null && alert.channel.type != null) {
+    return [alert.channel];
+  }
+  return [];
+};
+
+export enum AlertSource {
+  SAVED_SEARCH = 'saved_search',
+  TILE = 'tile',
+  /** Detached alert whose chart config lives inline on the alert (no saved search/tile). */
+  INLINE = 'inline',
+}
+
+export interface IAlert {
+  id: string;
+  channel: AlertChannel;
+  channels?: AlertChannel[];
+  interval: AlertInterval;
+  scheduleOffsetMinutes?: number;
+  scheduleStartAt?: Date | null;
+  source?: AlertSource;
+  state: AlertState;
+  team: ObjectId;
+  threshold: number;
+  /** The upper bound for BETWEEN and NOT BETWEEN threshold types */
+  thresholdMax?: number;
+  thresholdType: AlertThresholdType;
+  createdBy?: ObjectId;
+
+  // Message template (handlebars)
+  name?: string | null;
+  message?: string | null;
+
+  // Freeform note (supports markdown)
+  note?: string | null;
+
+  // User-facing name shown in the alerts list and notification titles (when not overridden by name template).
+  // Unset means "derive from the referenced saved search / dashboard tile".
+  displayName?: string | null;
+  // Unset (not []) means "derive from the referenced entity".
+  tags?: string[] | null;
+
+  // SavedSearch alerts
+  groupBy?: string | null;
+  savedSearch?: ObjectId | null;
+
+  // Tile alerts
+  dashboard?: ObjectId | null;
+  tileId?: string | null;
+
+  // Inline alerts: the persisted chart config (same shape as a dashboard
+  // tile's config, minus the embedded alert field)
+  chartConfig?: AlertChartConfig | null;
+
+  // Silenced
+  silenced?: {
+    by?: ObjectId;
+    at: Date;
+    until: Date;
+  };
+
+  // Multi-window alerting: fire only after N violations in M consecutive windows
+  numConsecutiveWindows?: number | null;
+
+  // Errors recorded during the most recent execution
+  executionErrors?: IAlertError[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type AlertDocument = mongoose.HydratedDocument<IAlert>;
+
+const AlertSchema = new Schema<IAlert>(
+  {
+    threshold: {
+      type: Number,
+      required: true,
+    },
+    thresholdMax: {
+      type: Number,
+      required: false,
+    },
+    thresholdType: {
+      type: String,
+      enum: AlertThresholdType,
+      required: false,
+    },
+    interval: {
+      type: String,
+      required: true,
+    },
+    scheduleOffsetMinutes: {
+      type: Number,
+      min: 0,
+      // Maximum offset for daily windows (24h - 1 minute).
+      max: 1439,
+      validate: {
+        validator: function (this: IAlert, value: number | undefined) {
+          if (value == null) {
+            return true;
+          }
+
+          const intervalMinutes = ALERT_INTERVAL_TO_MINUTES[this.interval];
+          return intervalMinutes == null || value < intervalMinutes;
+        },
+        message:
+          'scheduleOffsetMinutes must be less than the alert interval in minutes',
+      },
+      required: false,
+    },
+    scheduleStartAt: {
+      type: Date,
+      required: false,
+    },
+    channel: Schema.Types.Mixed, // slack, email, etc
+    // Canonical list of notification channels. `channel` above is kept in
+    // sync (first entry) so pre-multi-channel readers keep working.
+    // `default: undefined` stops Mongoose materialising [] on old documents.
+    channels: { type: [Schema.Types.Mixed], default: undefined },
+    state: {
+      type: String,
+      enum: AlertState,
+      default: AlertState.OK,
+    },
+    source: {
+      type: String,
+      required: false,
+      default: AlertSource.SAVED_SEARCH,
+    },
+    team: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: Team.modelName,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: false,
+    },
+
+    // Message template
+    name: {
+      type: String,
+      required: false,
+    },
+    message: {
+      type: String,
+      required: false,
+    },
+    note: {
+      type: String,
+      required: false,
+    },
+    displayName: {
+      type: String,
+      required: false,
+    },
+    // `default: undefined` stops Mongoose materializing [], which would make
+    // an un-backfilled document indistinguishable from one whose tags the user
+    // deliberately emptied.
+    tags: { type: [String], default: undefined },
+
+    // Log alerts
+    savedSearch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'SavedSearch',
+      required: false,
+    },
+    groupBy: {
+      type: String,
+      required: false,
+    },
+
+    // Chart alerts
+    dashboard: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Dashboard',
+      required: false,
+    },
+    tileId: {
+      type: String,
+      required: false,
+    },
+
+    // Inline alerts
+    chartConfig: {
+      type: Schema.Types.Mixed,
+      required: false,
+    },
+    numConsecutiveWindows: {
+      type: Number,
+      required: false,
+      min: 1,
+    },
+    silenced: {
+      required: false,
+      type: {
+        by: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+          required: false,
+        },
+        at: {
+          type: Date,
+          required: true,
+        },
+        until: {
+          type: Date,
+          required: true,
+        },
+        required: false,
+      },
+    },
+    executionErrors: {
+      type: [
+        {
+          _id: false,
+          timestamp: { type: Date, required: true },
+          type: {
+            type: String,
+            enum: AlertErrorType,
+            required: true,
+          },
+          message: { type: String, required: true },
+        },
+      ],
+      required: false,
+      default: undefined,
+    },
+  },
+  {
+    timestamps: true,
+    toJSON: { virtuals: true },
+  },
+);
+
+// Team-scoped list/count queries (e.g. external API pagination) filter on team
+// and sort by _id. Compound so the sort is index-covered (no in-memory sort).
+AlertSchema.index({ team: 1, _id: 1 });
+
+export default mongoose.model<IAlert>('Alert', AlertSchema);

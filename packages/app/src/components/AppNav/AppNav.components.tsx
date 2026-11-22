@@ -1,0 +1,420 @@
+import React from 'react';
+import Link from 'next/link';
+import cx from 'classnames';
+import {
+  Avatar,
+  Badge,
+  Button,
+  Group,
+  Menu,
+  Paper,
+  Text,
+  Tooltip,
+  UnstyledButton,
+} from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
+import {
+  IconBook,
+  IconBrandDiscord,
+  IconBug,
+  IconBulb,
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconChevronUp,
+  IconKeyboard,
+  IconLogout,
+  IconSettings,
+  IconUserCog,
+} from '@tabler/icons-react';
+
+import { IS_LOCAL_MODE } from '@/config';
+import { copyTextToClipboard } from '@/utils/clipboard';
+
+import { HelpSparkle } from './HelpSparkle';
+import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
+import { useWhatsNewUnseen } from './useWhatsNewUnseen';
+import { WhatsNewDrawer } from './WhatsNewDrawer';
+import { WhatsNewSection } from './WhatsNewSection';
+
+import styles from './AppNav.module.scss';
+
+export const AppNavContext = React.createContext<{
+  isCollapsed: boolean;
+  pathname: string;
+}>({
+  isCollapsed: false,
+  pathname: '/',
+});
+
+export const AppNavCloudBanner = () => {
+  return (
+    <div className="mt-3 mb-1 bg-muted rounded p-2 text-center">
+      <span className="fs-8">Ready to deploy on ClickHouse Cloud?</span>
+      <div className="mt-2 mb-2">
+        <Button
+          variant="primary"
+          size="xs"
+          component="a"
+          href="https://clickhouse.com/docs/use-cases/observability/clickstack/getting-started#deploy-with-clickhouse-cloud"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Get Started for Free
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+type AppNavUserMenuProps = {
+  userName?: string;
+  teamName?: string;
+  logoutUrl?: string | null;
+  onClickUserPreferences?: () => void;
+};
+
+const getUserInitials = (userName: string) => {
+  const nameParts = userName.trim().split(/\s+/).filter(Boolean);
+
+  if (nameParts.length === 0) {
+    return 'U';
+  }
+
+  return nameParts.map(name => name.charAt(0).toUpperCase()).join('');
+};
+
+export const AppNavUserMenu = ({
+  userName = 'User',
+  teamName,
+  logoutUrl,
+  onClickUserPreferences,
+}: AppNavUserMenuProps) => {
+  const { isCollapsed } = React.use(AppNavContext);
+  const resolvedUserName = userName.trim() || 'User';
+
+  const initials = getUserInitials(resolvedUserName);
+
+  const displayName = IS_LOCAL_MODE ? 'Local mode' : resolvedUserName;
+
+  return (
+    <Menu position="top-start" transitionProps={{ transition: 'fade-up' }}>
+      <Menu.Target>
+        <Paper
+          data-testid="user-menu-trigger"
+          className={cx(styles.userMenu, {
+            [styles.userMenuCollapsed]: isCollapsed,
+          })}
+        >
+          <Group gap="xs" wrap="nowrap" miw={0}>
+            <Avatar size="sm" radius="xl" color="gray">
+              {initials}
+            </Avatar>
+            {!isCollapsed && (
+              <>
+                <Tooltip
+                  fz="xs"
+                  color="gray"
+                  ta="center"
+                  label={
+                    <>
+                      <strong>{displayName}</strong>
+                      <br />
+                      {teamName}
+                    </>
+                  }
+                  openDelay={250}
+                >
+                  <div className={styles.userMenuInfo}>
+                    <Text
+                      size="xs"
+                      fw="bold"
+                      lh={1.1}
+                      className={styles.userMenuName}
+                    >
+                      {displayName}
+                    </Text>
+                    <Text size="xs" className={styles.userMenuTeam}>
+                      {teamName}
+                    </Text>
+                  </div>
+                </Tooltip>
+                <IconChevronRight size={14} />
+              </>
+            )}
+          </Group>
+        </Paper>
+      </Menu.Target>
+      <Menu.Dropdown>
+        {IS_LOCAL_MODE ? (
+          <Menu.Label fz="xs">Local mode</Menu.Label>
+        ) : (
+          <Menu.Item
+            data-testid="team-settings-menu-item"
+            href="/team"
+            component={Link}
+            leftSection={<IconSettings size={16} />}
+          >
+            Team Settings
+          </Menu.Item>
+        )}
+        <Menu.Item
+          data-testid="user-preferences-menu-item"
+          leftSection={<IconUserCog size={16} />}
+          onClick={onClickUserPreferences}
+        >
+          User Preferences
+        </Menu.Item>
+        {logoutUrl && (
+          <>
+            <Menu.Divider />
+            <Menu.Item
+              data-testid="logout-menu-item"
+              color="red"
+              leftSection={<IconLogout size={16} />}
+              component={Link}
+              href={logoutUrl}
+            >
+              Logout
+            </Menu.Item>
+          </>
+        )}
+      </Menu.Dropdown>
+    </Menu>
+  );
+};
+
+const AppNavVersionItem = ({ version }: { version?: string }) => {
+  const [copied, setCopied] = React.useState(false);
+
+  return (
+    <Menu.Item
+      data-testid="copy-debug-info-menu-item"
+      closeMenuOnClick={false}
+      leftSection={copied ? <IconCheck size={16} /> : <IconBug size={16} />}
+      onClick={async () => {
+        // window.hdx (installed in _app.tsx) builds the full report; copy via
+        // the shared util so the insecure-context textarea fallback applies and
+        // we get a real success boolean back. Only flip to "Copied" when the
+        // clipboard actually took the text.
+        const text = window.hdx?.report() ?? `frontend: ${version ?? 'dev'}`;
+        const ok = await copyTextToClipboard(text);
+        if (ok) {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }
+      }}
+    >
+      {copied ? 'Copied debug info' : 'Copy debug info'}
+    </Menu.Item>
+  );
+};
+
+// `version` is the running build. `whatsNewVersion` is the newest release in
+// the notes and drives the sparkle — see useWhatsNewUnseen.
+export const AppNavHelpMenu = ({
+  version,
+  whatsNewVersion,
+}: {
+  version?: string;
+  whatsNewVersion?: string;
+}) => {
+  const { isCollapsed } = React.use(AppNavContext);
+  const [
+    shortcutsOpened,
+    { open: openShortcutsModal, close: closeShortcutsModal },
+  ] = useDisclosure(false);
+  // Control the Help menu's open state so we can both fetch "What's new" lazily
+  // (only when the menu is open) and close it when the drawer takes over.
+  const [helpMenuOpened, setHelpMenuOpened] = React.useState(false);
+  const [
+    whatsNewDrawerOpened,
+    { open: openWhatsNewDrawer, close: closeWhatsNewDrawer },
+  ] = useDisclosure(false);
+  // Sparkle the Help button when a release newer than the one this browser
+  // acknowledged has been published.
+  const [hasUnseenWhatsNew, markWhatsNewSeen] =
+    useWhatsNewUnseen(whatsNewVersion);
+  // Opening the menu marks the release seen, which clears hasUnseenWhatsNew in
+  // the same tick — so the menu has to render off a snapshot taken at open time.
+  // Passing hasUnseenWhatsNew straight down gives a sparkle that never appears.
+  const [wasUnseenOnOpen, setWasUnseenOnOpen] = React.useState(false);
+
+  return (
+    <>
+      <Menu
+        position="right-start"
+        transitionProps={{ transition: 'fade-right' }}
+        width={320}
+        opened={helpMenuOpened}
+        onChange={setHelpMenuOpened}
+        onOpen={() => {
+          setWasUnseenOnOpen(hasUnseenWhatsNew);
+          markWhatsNewSeen();
+        }}
+      >
+        <Menu.Target>
+          <UnstyledButton
+            data-testid="help-menu-trigger"
+            className={styles.navItem}
+          >
+            <span className={styles.navItemContent}>
+              <span className={styles.navItemIcon}>
+                <HelpSparkle hasUnseen={hasUnseenWhatsNew} />
+              </span>
+              {!isCollapsed && <span>Help</span>}
+            </span>
+          </UnstyledButton>
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Label>Help</Menu.Label>
+
+          <Menu.Item
+            data-testid="documentation-menu-item"
+            href="https://clickhouse.com/docs/use-cases/observability/clickstack"
+            component="a"
+            target="_blank"
+            rel="noopener noreferrer"
+            leftSection={<IconBook size={16} />}
+          >
+            Documentation
+          </Menu.Item>
+          <Menu.Item
+            data-testid="setup-instructions-menu-item"
+            leftSection={<IconBulb size={16} />}
+            href="https://clickhouse.com/docs/use-cases/observability/clickstack/getting-started"
+            component="a"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Setup Instructions
+          </Menu.Item>
+          <Menu.Item
+            data-testid="keyboard-shortcuts-menu-item"
+            leftSection={<IconKeyboard size={16} />}
+            onClick={openShortcutsModal}
+          >
+            Keyboard shortcuts
+          </Menu.Item>
+          <Menu.Item
+            data-testid="discord-menu-item"
+            leftSection={<IconBrandDiscord size={16} />}
+            component="a"
+            href="https://hyperdx.io/discord"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Discord Community
+          </Menu.Item>
+
+          <Menu.Divider />
+
+          <WhatsNewSection
+            enabled={helpMenuOpened}
+            hasUnseen={wasUnseenOnOpen}
+            version={version}
+            onViewAll={() => {
+              setHelpMenuOpened(false);
+              openWhatsNewDrawer();
+            }}
+          />
+
+          <Menu.Divider />
+
+          <AppNavVersionItem version={version} />
+        </Menu.Dropdown>
+      </Menu>
+      <KeyboardShortcutsModal
+        opened={shortcutsOpened}
+        onClose={closeShortcutsModal}
+      />
+      <WhatsNewDrawer
+        opened={whatsNewDrawerOpened}
+        onClose={closeWhatsNewDrawer}
+      />
+    </>
+  );
+};
+
+export const AppNavLink = ({
+  className,
+  label,
+  icon,
+  href,
+  isExpanded,
+  onToggle,
+  isBeta,
+  isActive,
+}: {
+  className?: string;
+  label: React.ReactNode;
+  icon: React.ReactNode;
+  href: string;
+  isExpanded?: boolean;
+  onToggle?: () => void;
+  isBeta?: boolean;
+  isActive?: boolean;
+}) => {
+  const { pathname, isCollapsed } = React.use(AppNavContext);
+
+  const testId = `nav-link-${href.replace(/^\//, '').replace(/\//g, '-') || 'home'}`;
+
+  const handleToggleClick = (e: React.MouseEvent) => {
+    // Clicking chevron only toggles submenu, doesn't navigate
+    // This separates navigation (clicking link) from expand/collapse (clicking chevron)
+    e.preventDefault();
+    e.stopPropagation();
+    onToggle?.();
+  };
+
+  // Check if current path matches this nav item
+  // Use exact match or startsWith to avoid partial matches (e.g., /search matching /search-settings)
+  const defaultIsActive = pathname === href || pathname?.startsWith(href + '/');
+  const isActiveResolved = isActive ?? defaultIsActive;
+
+  return (
+    <Link
+      data-testid={testId}
+      href={href}
+      className={cx(
+        styles.navItem,
+        { [styles.navItemActive]: isActiveResolved },
+        className,
+      )}
+    >
+      <span className={styles.navItemContent}>
+        <span className={styles.navItemIcon}>{icon}</span>
+        {!isCollapsed && <span>{label}</span>}
+      </span>
+      {!isCollapsed && isBeta && (
+        <Badge
+          size="xs"
+          color="blue"
+          variant="light"
+          className={styles.navItemBadge}
+        >
+          Beta
+        </Badge>
+      )}
+      {!isCollapsed && onToggle && (
+        <Tooltip
+          label={isExpanded ? 'Hide Favorites' : 'Show Favorites'}
+          position="right"
+        >
+          <button
+            type="button"
+            data-testid={`${testId}-toggle`}
+            className={styles.navItemToggle}
+            onClick={handleToggleClick}
+          >
+            {isExpanded ? (
+              <IconChevronUp size={14} className="text-muted-hover" />
+            ) : (
+              <IconChevronDown size={14} className="text-muted-hover" />
+            )}
+          </button>
+        </Tooltip>
+      )}
+    </Link>
+  );
+};

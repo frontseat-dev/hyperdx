@@ -1,0 +1,875 @@
+import {
+  ChartConfigWithDateRange,
+  DashboardFilter,
+  DisplayType,
+  SavedChartConfig,
+  SourceKind,
+  TSource,
+} from '@hyperdx/common-utils/dist/types';
+
+import { ChartEditorFormState } from '@/components/ChartEditor/types';
+import {
+  buildChartConfigForExplanations,
+  buildGroupByConnectionProps,
+  buildSampleEventsConfig,
+  computeDbTimeChartConfig,
+  displayTypeToActiveTab,
+  isQueryReady,
+  resolvePreviewVariables,
+  resolveTilePreviewFilters,
+  seriesToFilters,
+  tabQueriesData,
+  TABS_WITH_GENERATED_SQL,
+} from '@/components/DBEditTimeChartForm/utils';
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const dateRange: [Date, Date] = [
+  new Date('2024-01-01'),
+  new Date('2024-01-02'),
+];
+
+const builderConfig: ChartConfigWithDateRange = {
+  select: [
+    {
+      aggFn: 'count',
+      aggCondition: '',
+      valueExpression: '',
+    },
+  ],
+  from: { databaseName: 'default', tableName: 'logs' },
+  where: '',
+  whereLanguage: 'sql',
+  timestampValueExpression: 'Timestamp',
+  connection: 'clickhouse',
+  dateRange,
+  granularity: 'auto',
+} as ChartConfigWithDateRange;
+
+const rawSqlConfig = {
+  configType: 'sql' as const,
+  sqlTemplate: 'SELECT count() FROM logs',
+  connection: 'clickhouse',
+  dateRange,
+} as ChartConfigWithDateRange;
+
+const logSource = {
+  kind: SourceKind.Log,
+  id: 'log-source',
+  name: 'Logs',
+  from: { databaseName: 'default', tableName: 'logs' },
+  connection: 'clickhouse',
+  timestampValueExpression: 'Timestamp',
+  defaultTableSelectExpression: '*',
+} as TSource;
+
+// eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+const metricSource = {
+  kind: SourceKind.Metric,
+  id: 'metric-source',
+  name: 'Metrics',
+  from: { databaseName: 'default', tableName: '' },
+  connection: 'clickhouse',
+  timestampValueExpression: 'Timestamp',
+  metricTables: {
+    gauge: 'metrics.gauge',
+    sum: 'metrics.sum',
+    histogram: 'metrics.histogram',
+  },
+} as TSource;
+
+const savedChartConfig: SavedChartConfig = {
+  name: 'Test Chart',
+  source: 'log-source',
+  displayType: DisplayType.Line,
+  select: [
+    {
+      aggFn: 'count',
+      aggCondition: '',
+      valueExpression: '',
+    },
+  ],
+  where: '',
+  whereLanguage: 'sql',
+  granularity: 'auto',
+} as SavedChartConfig;
+
+const rawSqlSavedChartConfig: SavedChartConfig = {
+  configType: 'sql' as const,
+  name: 'SQL Chart',
+  sqlTemplate: 'SELECT count() FROM logs',
+  connection: 'clickhouse',
+} as SavedChartConfig;
+
+// ---------------------------------------------------------------------------
+// isQueryReady
+// ---------------------------------------------------------------------------
+
+describe('isQueryReady', () => {
+  it('returns false for undefined', () => {
+    expect(isQueryReady(undefined)).toBe(false);
+  });
+
+  it('returns truthy for a valid builder config', () => {
+    expect(isQueryReady(builderConfig)).toBeTruthy();
+  });
+
+  it('returns falsy when select is empty array', () => {
+    expect(isQueryReady({ ...builderConfig, select: [] })).toBeFalsy();
+  });
+
+  it('returns truthy when select is a string', () => {
+    expect(
+      isQueryReady({ ...builderConfig, select: 'col1, col2' }),
+    ).toBeTruthy();
+  });
+
+  it('returns falsy when databaseName is missing', () => {
+    expect(
+      isQueryReady({
+        ...builderConfig,
+        from: { databaseName: '', tableName: 'logs' },
+      }),
+    ).toBeFalsy();
+  });
+
+  it('returns truthy for metric sources with metricTables but empty tableName', () => {
+    expect(
+      isQueryReady({
+        ...builderConfig,
+        from: { databaseName: 'default', tableName: '' },
+        metricTables: { gauge: 'metrics.gauge' },
+      } as ChartConfigWithDateRange),
+    ).toBeTruthy();
+  });
+
+  it('returns truthy for raw SQL config with sqlTemplate and connection', () => {
+    expect(isQueryReady(rawSqlConfig)).toBeTruthy();
+  });
+
+  it('returns false for raw SQL config without sqlTemplate', () => {
+    expect(
+      isQueryReady({
+        ...rawSqlConfig,
+        sqlTemplate: '',
+      } as ChartConfigWithDateRange),
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// seriesToFilters
+// ---------------------------------------------------------------------------
+
+describe('seriesToFilters', () => {
+  it('returns empty array for string select', () => {
+    expect(seriesToFilters('col1, col2')).toEqual([]);
+  });
+
+  it('converts series with conditions to filters', () => {
+    const select = [
+      {
+        aggFn: 'count',
+        aggCondition: 'status > 400',
+        aggConditionLanguage: 'sql' as const,
+        valueExpression: '',
+      },
+      {
+        aggFn: 'avg',
+        aggCondition: 'level:error',
+        aggConditionLanguage: 'lucene' as const,
+        valueExpression: 'duration',
+      },
+    ];
+
+    expect(seriesToFilters(select)).toEqual([
+      { type: 'sql', condition: 'status > 400' },
+      { type: 'lucene', condition: 'level:error' },
+    ]);
+  });
+
+  it('skips series with null condition or language', () => {
+    const select = [
+      {
+        aggFn: 'count',
+        aggCondition: '',
+        aggConditionLanguage: 'lucene' as const,
+        valueExpression: '',
+      },
+      {
+        aggFn: 'avg',
+        valueExpression: 'duration',
+      },
+    ];
+
+    // First has empty string condition (still not null), second has no language
+    expect(seriesToFilters(select)).toEqual([
+      { type: 'lucene', condition: '' },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// displayTypeToActiveTab
+// ---------------------------------------------------------------------------
+
+describe('displayTypeToActiveTab', () => {
+  it.each([
+    [DisplayType.Search, 'search'],
+    [DisplayType.Markdown, 'markdown'],
+    [DisplayType.Table, 'table'],
+    [DisplayType.Pie, 'pie'],
+    [DisplayType.Bar, 'bar'],
+    [DisplayType.Number, 'number'],
+    [DisplayType.Line, 'time'],
+  ])('maps %s to %s', (displayType, expected) => {
+    expect(displayTypeToActiveTab(displayType)).toBe(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TABS_WITH_GENERATED_SQL
+// ---------------------------------------------------------------------------
+
+describe('tabQueriesData', () => {
+  it('is false only for the markdown tab', () => {
+    expect(tabQueriesData('markdown')).toBe(false);
+    expect(tabQueriesData('time')).toBe(true);
+    expect(tabQueriesData('search')).toBe(true);
+  });
+});
+
+describe('TABS_WITH_GENERATED_SQL', () => {
+  it('includes table, time, number, pie, bar, heatmap', () => {
+    expect(TABS_WITH_GENERATED_SQL.has('table')).toBe(true);
+    expect(TABS_WITH_GENERATED_SQL.has('time')).toBe(true);
+    expect(TABS_WITH_GENERATED_SQL.has('number')).toBe(true);
+    expect(TABS_WITH_GENERATED_SQL.has('pie')).toBe(true);
+    expect(TABS_WITH_GENERATED_SQL.has('bar')).toBe(true);
+    expect(TABS_WITH_GENERATED_SQL.has('heatmap')).toBe(true);
+  });
+
+  it('excludes search, markdown', () => {
+    expect(TABS_WITH_GENERATED_SQL.has('search')).toBe(false);
+    expect(TABS_WITH_GENERATED_SQL.has('markdown')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeDbTimeChartConfig
+// ---------------------------------------------------------------------------
+
+describe('computeDbTimeChartConfig', () => {
+  it('returns undefined when queriedConfig is undefined', () => {
+    expect(computeDbTimeChartConfig(undefined, undefined)).toBeUndefined();
+  });
+
+  it('returns config unchanged when there is no alert', () => {
+    const result = computeDbTimeChartConfig(builderConfig, undefined);
+    expect(result).toEqual(builderConfig);
+  });
+
+  it('overrides granularity and dateRange when alert is present', () => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    const alert = {
+      interval: '1h' as const,
+      threshold: 100,
+      thresholdType: 'above' as const,
+      channel: { type: 'webhook' as const },
+    } as unknown as ChartEditorFormState['alert'];
+
+    const result = computeDbTimeChartConfig(builderConfig, alert);
+
+    expect(result).toBeDefined();
+    // granularity should be changed from the alert interval
+    expect(result!.granularity).not.toBe(builderConfig.granularity);
+    // dateRange should be extended
+    expect(result!.dateRange).toBeDefined();
+  });
+
+  it('preserves other config fields', () => {
+    const result = computeDbTimeChartConfig(builderConfig, undefined);
+    expect(result!.connection).toBe(builderConfig.connection);
+    expect(result!.from).toBe(builderConfig.from);
+    // @ts-expect-error union types..
+    expect(result!.select).toBe(builderConfig.select);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolvePreviewVariables
+// ---------------------------------------------------------------------------
+
+describe('resolvePreviewVariables', () => {
+  const variables = [
+    { name: 'service', values: ['api'] },
+    { name: 'env', values: ['prod'] },
+  ];
+
+  const promqlConfig: ChartConfigWithDateRange = {
+    configType: 'promql',
+    promqlExpression: 'up{service=~"$service"}',
+    connection: 'local',
+    dateRange,
+  };
+
+  it('returns undefined when there are no variables in scope', () => {
+    expect(
+      resolvePreviewVariables({
+        config: promqlConfig,
+        variables: undefined,
+        applySelections: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('keeps the variables a PromQL expression references', () => {
+    expect(
+      resolvePreviewVariables({
+        config: promqlConfig,
+        variables,
+        applySelections: true,
+      }),
+    ).toEqual([{ name: 'service', values: ['api'] }]);
+  });
+
+  it('drops the selections when they are not being applied', () => {
+    expect(
+      resolvePreviewVariables({
+        config: promqlConfig,
+        variables,
+        applySelections: false,
+      }),
+    ).toEqual([{ name: 'service', values: [] }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveTilePreviewFilters
+// ---------------------------------------------------------------------------
+
+describe('resolveTilePreviewFilters', () => {
+  const dashboardFilters = [
+    { type: 'sql' as const, condition: "ServiceName IN ('api')" },
+  ];
+  const variables = [{ name: 'service', values: ['api'] }];
+
+  const promqlConfig: ChartConfigWithDateRange = {
+    configType: 'promql',
+    promqlExpression: 'up{service=~"$service"}',
+    connection: 'local',
+    dateRange,
+  };
+
+  const rawSqlWithFiltersMacro: ChartConfigWithDateRange = {
+    configType: 'sql',
+    sqlTemplate: 'SELECT count() FROM logs WHERE $__filters',
+    connection: 'clickhouse',
+    dateRange,
+  };
+
+  const requiredFilter: DashboardFilter = {
+    id: 'f1',
+    type: 'QUERY_EXPRESSION',
+    name: 'Service',
+    expression: 'ServiceName',
+    source: 'log-source',
+    minSelections: 1,
+  };
+
+  const resolve = (
+    overrides: Partial<Parameters<typeof resolveTilePreviewFilters>[0]> = {},
+  ) =>
+    resolveTilePreviewFilters({
+      config: builderConfig,
+      sourceId: 'log-source',
+      filters: dashboardFilters,
+      variables,
+      unsatisfiedRequiredFilters: undefined,
+      applySelections: true,
+      ...overrides,
+    });
+
+  it('applies the filters to a builder tile', () => {
+    expect(resolve()).toEqual({
+      filters: dashboardFilters,
+      variables: [],
+      missingRequiredFilterNames: [],
+    });
+  });
+
+  it('keeps the selected values of the variables a tile references', () => {
+    expect(resolve({ config: promqlConfig }).variables).toEqual(variables);
+  });
+
+  it('drops the filters and empties the selections when turned off', () => {
+    expect(resolve({ config: promqlConfig, applySelections: false })).toEqual({
+      filters: undefined,
+      variables: [{ name: 'service', values: [] }],
+      missingRequiredFilterNames: [],
+    });
+  });
+
+  it('never hands filters to a PromQL tile', () => {
+    expect(resolve({ config: promqlConfig }).filters).toBeUndefined();
+  });
+
+  it('drops the filters a raw-SQL template would not apply', () => {
+    expect(resolve({ config: rawSqlWithFiltersMacro }).filters).toEqual(
+      dashboardFilters,
+    );
+    expect(resolve({ config: rawSqlConfig }).filters).toBeUndefined();
+  });
+
+  it('reports the required filters that block the preview', () => {
+    expect(
+      resolve({ unsatisfiedRequiredFilters: [requiredFilter] })
+        .missingRequiredFilterNames,
+    ).toEqual(['Service']);
+  });
+
+  // A static-list filter broadcasts nothing, so only a tile referencing its
+  // variable is blocked by it.
+  it('reports a required filter the tile references as a variable', () => {
+    const requiredVariable: DashboardFilter = {
+      id: 'f2',
+      type: 'STATIC_LIST',
+      name: 'Environment',
+      options: ['prod'],
+      isBroadcastEnabled: false,
+      isVariableEnabled: true,
+      variableName: 'service',
+      minSelections: 1,
+    };
+
+    expect(
+      resolve({
+        config: promqlConfig,
+        unsatisfiedRequiredFilters: [requiredVariable],
+      }).missingRequiredFilterNames,
+    ).toEqual(['Environment']);
+    expect(
+      resolve({ unsatisfiedRequiredFilters: [requiredVariable] })
+        .missingRequiredFilterNames,
+    ).toEqual([]);
+  });
+
+  it('reports no block for a tile the required filter does not reach', () => {
+    expect(
+      resolve({
+        sourceId: 'other-source',
+        unsatisfiedRequiredFilters: [
+          { ...requiredFilter, appliesToSourceIds: ['log-source'] },
+        ],
+      }).missingRequiredFilterNames,
+    ).toEqual([]);
+  });
+
+  it('reports no block while the filters are turned off', () => {
+    expect(
+      resolve({
+        unsatisfiedRequiredFilters: [requiredFilter],
+        applySelections: false,
+      }).missingRequiredFilterNames,
+    ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildSampleEventsConfig
+// ---------------------------------------------------------------------------
+
+describe('buildSampleEventsConfig', () => {
+  it('returns null when tableSource is undefined', () => {
+    expect(
+      buildSampleEventsConfig(builderConfig, undefined, dateRange, true),
+    ).toBeNull();
+  });
+
+  it('returns null when queriedConfig is undefined', () => {
+    expect(
+      buildSampleEventsConfig(undefined, logSource, dateRange, true),
+    ).toBeNull();
+  });
+
+  it('returns null when queryReady is false', () => {
+    expect(
+      buildSampleEventsConfig(builderConfig, logSource, dateRange, false),
+    ).toBeNull();
+  });
+
+  it('returns null for raw SQL config', () => {
+    expect(
+      buildSampleEventsConfig(rawSqlConfig, logSource, dateRange, true),
+    ).toBeNull();
+  });
+
+  it('builds config for a valid builder config with log source', () => {
+    const result = buildSampleEventsConfig(
+      builderConfig,
+      logSource,
+      dateRange,
+      true,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.dateRange).toBe(dateRange);
+    expect(result!.connection).toBe(logSource.connection);
+    expect(result!.from).toBe(logSource.from);
+    expect(result!.limit).toEqual({ limit: 200 });
+    // @ts-expect-error union types..
+    expect(result!.select).toBe(logSource.defaultTableSelectExpression);
+    expect(result!.orderBy).toEqual([
+      { ordering: 'DESC', valueExpression: 'Timestamp' },
+    ]);
+    expect(result!.filtersLogicalOperator).toBe('OR');
+    expect(result!.groupBy).toBeUndefined();
+    expect(result!.granularity).toBeUndefined();
+    expect(result!.having).toBeUndefined();
+  });
+
+  it('uses empty string for select when source has no defaultTableSelectExpression', () => {
+    const result = buildSampleEventsConfig(
+      builderConfig,
+      metricSource,
+      dateRange,
+      true,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.select).toBe('');
+  });
+
+  // The agg conditions leave `select` for `filters`, which is never scanned for
+  // variables, so they have to be expanded on the way out.
+  describe('dashboard variables', () => {
+    const configWithAggCondition = (
+      aggCondition: string,
+      aggConditionLanguage: 'lucene' | 'sql',
+      values: string[],
+    ): ChartConfigWithDateRange =>
+      ({
+        ...builderConfig,
+        select: [
+          {
+            aggFn: 'count',
+            aggCondition,
+            aggConditionLanguage,
+            valueExpression: '',
+          },
+        ],
+        variables: [{ name: 'svc', expression: 'ServiceName', values }],
+      }) as ChartConfigWithDateRange;
+
+    it('expands a Lucene reference in an agg condition to the selected values', () => {
+      const result = buildSampleEventsConfig(
+        configWithAggCondition('ServiceName:${svc:lucene}', 'lucene', [
+          'accounting',
+        ]),
+        logSource,
+        dateRange,
+        true,
+      );
+
+      expect(result!.filters).toEqual([
+        { type: 'lucene', condition: 'ServiceName:("accounting")' },
+      ]);
+    });
+
+    it('expands a Lucene reference to its empty state when nothing is selected', () => {
+      const result = buildSampleEventsConfig(
+        configWithAggCondition('ServiceName:${svc:lucene}', 'lucene', []),
+        logSource,
+        dateRange,
+        true,
+      );
+
+      expect(result!.filters).toEqual([
+        { type: 'lucene', condition: 'ServiceName:("")' },
+      ]);
+    });
+
+    it('expands $__filter in a SQL agg condition to the selected values', () => {
+      const result = buildSampleEventsConfig(
+        configWithAggCondition('$__filter(ServiceName, $svc)', 'sql', [
+          'accounting',
+        ]),
+        logSource,
+        dateRange,
+        true,
+      );
+
+      expect(result!.filters).toEqual([
+        { type: 'sql', condition: "(ServiceName IN ('accounting'))" },
+      ]);
+    });
+
+    it('expands $__filter to its no-op form when nothing is selected', () => {
+      const result = buildSampleEventsConfig(
+        configWithAggCondition('$__filter(ServiceName, $svc)', 'sql', []),
+        logSource,
+        dateRange,
+        true,
+      );
+
+      expect(result!.filters).toEqual([
+        {
+          type: 'sql',
+          condition: "(1=1 /** no values selected for variable 'svc' */)",
+        },
+      ]);
+    });
+
+    it('expands the chart-level where and consumes the variables', () => {
+      const config = configWithAggCondition('', 'lucene', ['accounting']);
+      const result = buildSampleEventsConfig(
+        {
+          ...config,
+          where: 'ServiceName IN ($svc)',
+          whereLanguage: 'sql',
+        } as ChartConfigWithDateRange,
+        logSource,
+        dateRange,
+        true,
+      );
+
+      expect(result!.where).toBe("ServiceName IN ('accounting')");
+      // Cleared so the renderer doesn't substitute a second time
+      expect(result!.variables).toBeUndefined();
+    });
+
+    it('leaves the condition as written when a macro names an unknown variable', () => {
+      const build = () =>
+        buildSampleEventsConfig(
+          configWithAggCondition('$__filter(ServiceName, $nope)', 'sql', [
+            'accounting',
+          ]),
+          logSource,
+          dateRange,
+          true,
+        );
+
+      expect(build).not.toThrow();
+      expect(build()!.filters).toEqual([
+        { type: 'sql', condition: '$__filter(ServiceName, $nope)' },
+      ]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildChartConfigForExplanations
+// ---------------------------------------------------------------------------
+
+describe('buildChartConfigForExplanations', () => {
+  const baseParams = {
+    chartConfig: savedChartConfig,
+    dateRange,
+    activeTab: 'time',
+  };
+
+  it('returns raw SQL queriedConfig with updated dateRange', () => {
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      queriedConfig: rawSqlConfig,
+    });
+
+    expect(result).toBeDefined();
+    expect(result!.dateRange).toBe(dateRange);
+    // @ts-expect-error union types..
+    expect(result!.sqlTemplate).toBe(rawSqlConfig.sqlTemplate);
+  });
+
+  it('returns raw SQL savedChartConfig with updated dateRange', () => {
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      chartConfig: rawSqlSavedChartConfig,
+    });
+
+    expect(result).toBeDefined();
+    expect(result!.dateRange).toBe(dateRange);
+  });
+
+  it('returns undefined when no configs match', () => {
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      queriedConfig: undefined,
+      tableSource: undefined,
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  it('uses dbTimeChartConfig when activeTab is time and source matches', () => {
+    const dbTimeConfig = {
+      ...builderConfig,
+      granularity: '1 hour',
+    } as ChartConfigWithDateRange;
+
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      queriedConfig: builderConfig,
+      queriedSourceId: logSource.id,
+      tableSource: logSource,
+      activeTab: 'time',
+      dbTimeChartConfig: dbTimeConfig,
+    });
+
+    expect(result).toBeDefined();
+  });
+
+  it("applies the tile's series limit so the SQL preview matches the chart query", () => {
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      queriedConfig: builderConfig,
+      queriedSourceId: logSource.id,
+      tableSource: logSource,
+      activeTab: 'time',
+      dbTimeChartConfig: {
+        ...builderConfig,
+        seriesLimit: 3,
+      } as ChartConfigWithDateRange,
+    });
+
+    expect(result).toBeDefined();
+    expect(result!.seriesLimit).toBe(3);
+  });
+
+  it('omits seriesLimit (capping disabled) when the tile has no limit', () => {
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      queriedConfig: builderConfig,
+      queriedSourceId: logSource.id,
+      tableSource: logSource,
+      activeTab: 'time',
+      dbTimeChartConfig: builderConfig,
+    });
+
+    expect(result).toBeDefined();
+    expect(result!.seriesLimit).toBeUndefined();
+  });
+
+  it.each(['table', 'number', 'pie', 'bar'] as const)(
+    'uses queriedConfig for activeTab=%s and applies tab transform',
+    activeTab => {
+      const result = buildChartConfigForExplanations({
+        ...baseParams,
+        queriedConfig: builderConfig,
+        queriedSourceId: logSource.id,
+        tableSource: logSource,
+        activeTab,
+      });
+
+      expect(result).toBeDefined();
+    },
+  );
+
+  it('falls back to chartConfig when queriedSource does not match', () => {
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      queriedConfig: builderConfig,
+      queriedSourceId: 'other-source',
+      tableSource: logSource,
+      chartConfig: { ...savedChartConfig, source: logSource.id },
+    });
+
+    expect(result).toBeDefined();
+    // Should use tableSource fields since chartConfig.source matches
+    expect(result!.connection).toBe(logSource.connection);
+  });
+
+  it('returns config as-is for unrecognized activeTab', () => {
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      queriedConfig: builderConfig,
+      queriedSourceId: logSource.id,
+      tableSource: logSource,
+      activeTab: 'search',
+    });
+
+    expect(result).toBeDefined();
+    // @ts-expect-error union types..
+    expect(result!.select).toEqual(builderConfig.select);
+  });
+
+  it('returns undefined when config is raw SQL after resolution', () => {
+    // queriedConfig is builder but after source mismatch, falls back to
+    // chartConfig which is raw SQL
+    const result = buildChartConfigForExplanations({
+      ...baseParams,
+      queriedConfig: undefined,
+      tableSource: logSource,
+      chartConfig: rawSqlSavedChartConfig,
+    });
+
+    // Raw SQL saved config is handled early, returns with dateRange
+    expect(result).toBeDefined();
+    expect(result!.dateRange).toBe(dateRange);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildGroupByConnectionProps
+// ---------------------------------------------------------------------------
+
+describe('buildGroupByConnectionProps', () => {
+  const tableConnection = {
+    databaseName: 'default',
+    tableName: 'logs',
+    connectionId: 'clickhouse',
+  };
+
+  it('falls back to the source tableConnection for non-metric sources', () => {
+    const result = buildGroupByConnectionProps({
+      tableSource: logSource,
+      series: [{ metricType: 'gauge', metricName: 'cpu' }],
+      tableConnection,
+    });
+
+    expect(result).toEqual({ tableConnection });
+  });
+
+  it('builds one intersected connection per distinct metric table + name for mixed-type series', () => {
+    const result = buildGroupByConnectionProps({
+      tableSource: metricSource,
+      series: [
+        { metricType: 'gauge', metricName: 'cpu' },
+        { metricType: 'sum', metricName: 'requests' },
+        // duplicate of the first series — must be deduped
+        { metricType: 'gauge', metricName: 'cpu' },
+        // incomplete series — skipped
+        { metricType: 'gauge' },
+      ],
+      tableConnection,
+    });
+
+    expect(result.tableConnection).toBeUndefined();
+    expect(result.intersectFields).toBe(true);
+    expect(result.tableConnections).toEqual([
+      {
+        databaseName: 'default',
+        tableName: 'metrics.gauge',
+        connectionId: 'clickhouse',
+        metricName: 'cpu',
+      },
+      {
+        databaseName: 'default',
+        tableName: 'metrics.sum',
+        connectionId: 'clickhouse',
+        metricName: 'requests',
+      },
+    ]);
+  });
+
+  it('falls back to the tableConnection when a metric source has no resolvable series', () => {
+    const result = buildGroupByConnectionProps({
+      tableSource: metricSource,
+      series: [{ metricName: 'cpu' }], // no metricType
+      tableConnection,
+    });
+
+    expect(result).toEqual({ tableConnection });
+  });
+});

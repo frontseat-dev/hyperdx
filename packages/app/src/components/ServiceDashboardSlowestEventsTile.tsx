@@ -1,0 +1,146 @@
+import { pick } from 'lodash';
+import {
+  type Filter,
+  pickSampleWeightExpressionProps,
+  type TTraceSource,
+} from '@hyperdx/common-utils/dist/types';
+import { Text } from '@mantine/core';
+
+import { ChartCard } from '@/components/charts/ChartCard';
+import { useQueriedChartConfig } from '@/hooks/useChartConfig';
+import { useServiceDashboardExpressions } from '@/serviceDashboard';
+
+import ChartContainer from './charts/ChartContainer';
+import ChartErrorState from './charts/ChartErrorState';
+import DBSqlRowTableWithSideBar from './DBSqlRowTableWithSidebar';
+
+export default function SlowestEventsTile({
+  source,
+  dateRange,
+  height = 350,
+  title,
+  queryKeyPrefix,
+  enabled = true,
+  extraFilters,
+}: {
+  source: TTraceSource;
+  dateRange: [Date, Date];
+  height?: number;
+  title: React.ReactNode;
+  queryKeyPrefix?: string;
+  enabled?: boolean;
+  extraFilters?: Filter[];
+}) {
+  const { expressions } = useServiceDashboardExpressions({ source });
+
+  const { data, isLoading, isError, error } = useQueriedChartConfig(
+    {
+      source: source.id,
+      ...pick(source, ['timestampValueExpression', 'connection', 'from']),
+      ...pickSampleWeightExpressionProps(source),
+      where: '',
+      whereLanguage: 'sql',
+      select: [
+        // Separate the aggregations from the conversion to ms so that AggregatingMergeTree MVs can be used
+        {
+          alias: 'p95_duration_ns',
+          aggFn: 'quantile',
+          valueExpression: expressions?.duration ?? 'Duration',
+          level: 0.95,
+        },
+        {
+          alias: 'p95',
+          valueExpression: `p95_duration_ns / ${expressions?.durationDivisorForMillis}`,
+        },
+      ],
+      dateRange,
+      filters: extraFilters,
+    },
+    {
+      placeholderData: (prev: any) => prev,
+      queryKey: [queryKeyPrefix, source],
+      enabled: enabled && !!expressions,
+    },
+  );
+
+  const p95 = data?.data?.[0]?.['p95'];
+  const roundedP95 = Math.round(p95 ?? 0);
+
+  return (
+    <ChartCard style={{ height }}>
+      <ChartContainer
+        title={<Text size="sm">{title}</Text>}
+        toolbarItems={[
+          <Text key="slower-than" size="xs" style={{ whiteSpace: 'nowrap' }}>
+            (Slower than {roundedP95}ms)
+          </Text>,
+        ]}
+      >
+        {isLoading && !data ? (
+          <div className="d-flex h-100 w-100 align-items-center justify-content-center text-muted">
+            Loading Chart Data...
+          </div>
+        ) : isError ? (
+          <ChartErrorState error={error} />
+        ) : data?.data.length === 0 ? (
+          <div className="d-flex h-100 w-100 align-items-center justify-content-center text-muted">
+            No data found within time range.
+          </div>
+        ) : (
+          source &&
+          expressions && (
+            <DBSqlRowTableWithSideBar
+              sourceId={source.id}
+              config={{
+                source: source.id,
+                ...pick(source, [
+                  'timestampValueExpression',
+                  'connection',
+                  'from',
+                ]),
+                ...pickSampleWeightExpressionProps(source),
+                where: '',
+                whereLanguage: 'sql',
+                select: [
+                  {
+                    valueExpression: source.timestampValueExpression,
+                    alias: 'Timestamp',
+                  },
+                  {
+                    valueExpression: expressions.severityText,
+                    alias: 'Severity',
+                  },
+                  {
+                    valueExpression: expressions.spanName,
+                    alias: 'Span Name',
+                  },
+                  {
+                    valueExpression: expressions.durationInMillis,
+                    alias: 'Duration (ms)',
+                  },
+                ],
+                orderBy: [
+                  {
+                    valueExpression: expressions.durationInMillis,
+                    ordering: 'DESC',
+                  },
+                ],
+                limit: { limit: 200 },
+                dateRange,
+                filters: [
+                  ...(extraFilters ?? []),
+                  {
+                    type: 'sql',
+                    condition: `${expressions.durationInMillis} > ${roundedP95}`,
+                  },
+                ],
+              }}
+              isLive={false}
+              queryKeyPrefix="service-dashboard-slowest-transactions"
+            />
+          )
+        )}
+      </ChartContainer>
+    </ChartCard>
+  );
+}
